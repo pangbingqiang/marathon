@@ -3,13 +3,9 @@ package mesosphere.marathon
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Named
-import mesosphere.marathon.upgrade.DeploymentPlan
-import mesosphere.util.SerializeExecution
-
-import scala.util.control.NonFatal
 
 import akka.actor.SupervisorStrategy.Restart
-import akka.actor.{ ActorRefFactory, ActorRef, ActorSystem, OneForOneStrategy, Props }
+import akka.actor.{ ActorRef, ActorRefFactory, ActorSystem, OneForOneStrategy, Props }
 import akka.event.EventStream
 import akka.routing.RoundRobinPool
 import com.codahale.metrics.MetricRegistry
@@ -17,18 +13,22 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import com.google.inject._
 import com.google.inject.name.Names
 import com.twitter.common.base.Supplier
-import com.twitter.common.zookeeper.{ Candidate, CandidateImpl, ZooKeeperClient, Group => ZGroup }
-import org.apache.log4j.Logger
-import org.apache.mesos.state.{ State, ZooKeeperState }
-import org.apache.zookeeper.ZooDefs
-
+import com.twitter.common.zookeeper.{ Candidate, CandidateImpl, Group => ZGroup, ZooKeeperClient }
 import mesosphere.chaos.http.HttpConf
 import mesosphere.marathon.event.EventModule
 import mesosphere.marathon.health.{ HealthCheckManager, MarathonHealthCheckManager }
 import mesosphere.marathon.io.storage.StorageProvider
 import mesosphere.marathon.state._
 import mesosphere.marathon.tasks.{ TaskIdUtil, TaskQueue, TaskTracker }
+import mesosphere.marathon.upgrade.DeploymentPlan
 import mesosphere.mesos.util.FrameworkIdUtil
+import mesosphere.util.SerializeExecution
+import org.apache.log4j.Logger
+import org.apache.mesos.SchedulerDriver
+import org.apache.mesos.state.{ State, ZooKeeperState }
+import org.apache.zookeeper.ZooDefs
+
+import scala.util.control.NonFatal
 
 object ModuleNames {
   final val NAMED_CANDIDATE = "CANDIDATE"
@@ -43,9 +43,11 @@ class MarathonModule(conf: MarathonConf, http: HttpConf, zk: ZooKeeperClient)
   val log = Logger.getLogger(getClass.getName)
 
   def configure() {
+
     bind(classOf[MarathonConf]).toInstance(conf)
     bind(classOf[HttpConf]).toInstance(http)
     bind(classOf[ZooKeeperClient]).toInstance(zk)
+    bind(classOf[MarathonSchedulerDriverHolder]).in(Scopes.SINGLETON)
     bind(classOf[MarathonSchedulerService]).in(Scopes.SINGLETON)
     bind(classOf[MarathonScheduler]).in(Scopes.SINGLETON)
     bind(classOf[TaskTracker]).in(Scopes.SINGLETON)
@@ -66,6 +68,37 @@ class MarathonModule(conf: MarathonConf, http: HttpConf, zk: ZooKeeperClient)
       .annotatedWith(Names.named(ModuleNames.NAMED_LEADER_ATOMIC_BOOLEAN))
       .toInstance(leader)
 
+  }
+
+  @Provides
+  @Inject
+  @Singleton
+  def provideSchedulerCallbacks(schedulerService: MarathonSchedulerService): SchedulerCallbacks = {
+    new SchedulerCallbacks {
+      override def disconnected(): Unit = {
+        // Abdicate leadership when we become disconnected from the Mesos master.
+        schedulerService.abdicateLeadership()
+      }
+    }
+  }
+
+  /**
+    * Provider for [[SchedulerDriver]]s. It is no singleton by intention.
+    * As a side effect, it sets the corresponding driver in MarathonSchedulerDriver.
+    */
+  @Provides
+  @Inject
+  def provideSchedulerDriver(holder: MarathonSchedulerDriverHolder,
+                             config: MarathonConf,
+                             httpConfig: HttpConf,
+                             newScheduler: MarathonScheduler,
+                             frameworkIdUtil: FrameworkIdUtil): SchedulerDriver = {
+    import mesosphere.util.ThreadPoolContext.context
+    implicit val zkTimeout = config.zkFutureTimeout
+    val frameworkId = frameworkIdUtil.fetch
+    val driver = MarathonSchedulerDriver.newDriver(config, httpConfig, newScheduler, frameworkId)
+    holder.driver = Some(driver)
+    driver
   }
 
   @Provides
@@ -92,6 +125,7 @@ class MarathonModule(conf: MarathonConf, http: HttpConf, zk: ZooKeeperClient)
     taskTracker: TaskTracker,
     taskQueue: TaskQueue,
     frameworkIdUtil: FrameworkIdUtil,
+    driverHolder: MarathonSchedulerDriverHolder,
     taskIdUtil: TaskIdUtil,
     storage: StorageProvider,
     @Named(EventModule.busName) eventBus: EventStream,
@@ -111,6 +145,7 @@ class MarathonModule(conf: MarathonConf, http: HttpConf, zk: ZooKeeperClient)
         taskTracker,
         taskQueue,
         frameworkIdUtil,
+        driverHolder,
         taskIdUtil,
         storage,
         eventBus,
@@ -123,16 +158,16 @@ class MarathonModule(conf: MarathonConf, http: HttpConf, zk: ZooKeeperClient)
   @Provides
   @Singleton
   def provideCandidate(zk: ZooKeeperClient): Option[Candidate] = {
-    if (Main.conf.highlyAvailable()) {
+    if (conf.highlyAvailable()) {
       log.info("Registering in Zookeeper with hostname:"
-        + Main.conf.hostname())
+        + conf.hostname())
       val candidate = new CandidateImpl(new ZGroup(zk, ZooDefs.Ids.OPEN_ACL_UNSAFE,
-        Main.conf.zooKeeperLeaderPath),
+        conf.zooKeeperLeaderPath),
         new Supplier[Array[Byte]] {
           def get(): Array[Byte] = {
             //host:port
-            "%s:%d".format(Main.conf.hostname(),
-              Main.conf.httpPort()).getBytes
+            "%s:%d".format(conf.hostname(),
+              http.httpPort()).getBytes
           }
         })
       return Some(candidate)

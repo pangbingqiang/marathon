@@ -8,16 +8,15 @@ import mesosphere.marathon.api.MarathonRestModule
 import mesosphere.chaos.AppConfiguration
 import mesosphere.marathon.event.{ EventModule, EventConfiguration }
 import mesosphere.marathon.event.http.{ HttpEventModule, HttpEventConfiguration }
-import com.google.inject.AbstractModule
+import com.google.inject.{ Module, AbstractModule }
 import com.twitter.common.quantity.{ Time, Amount }
 import com.twitter.common.zookeeper.ZooKeeperClient
 import scala.collection.JavaConverters._
 import java.util.Properties
 import org.apache.log4j.Logger
 
-object Main extends App {
+class DefaultMain extends App {
   val log = Logger.getLogger(getClass.getName)
-  log.info(s"Starting Marathon ${BuildInfo.version}")
 
   lazy val zk: ZooKeeperClient = {
     require(
@@ -48,7 +47,7 @@ object Main extends App {
     client
   }
 
-  def modules(): Seq[AbstractModule] = {
+  def modules(): Seq[Module] = {
     Seq(
       new HttpModule(conf) {
         // burst browser cache for assets
@@ -81,10 +80,17 @@ object Main extends App {
     with EventConfiguration
     with HttpEventConfiguration
 
-  lazy val conf = new AllConf
+  override lazy val conf = new AllConf
 
-  run(
-    classOf[HttpService],
-    classOf[MarathonSchedulerService]
-  )
+  def runDefault(): Unit = {
+    log.info(s"Starting Marathon ${BuildInfo.version}")
+    run(
+      classOf[HttpService],
+      classOf[MarathonSchedulerService]
+    )
+  }
+}
+
+object Main extends DefaultMain {
+  runDefault()
 }

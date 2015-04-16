@@ -14,7 +14,6 @@ import scala.concurrent.duration._
 import akka.util.Timeout
 import org.apache.mesos.state.State
 import mesosphere.marathon.state.MarathonStore
-import mesosphere.marathon.Main
 import mesosphere.marathon.event.{ MarathonSubscriptionEvent, Subscribe }
 import mesosphere.marathon.MarathonConf
 
@@ -44,14 +43,15 @@ class HttpEventModule extends AbstractModule {
 
   @Provides
   @Named(HttpEventModule.SubscribersKeeperActor)
-  def provideSubscribersKeeperActor(system: ActorSystem,
+  def provideSubscribersKeeperActor(conf: HttpEventConfiguration,
+                                    system: ActorSystem,
                                     store: MarathonStore[EventSubscribers]): ActorRef = {
     implicit val timeout = HttpEventModule.timeout
     implicit val ec = HttpEventModule.executionContext
     val local_ip = java.net.InetAddress.getLocalHost.getHostAddress
 
     val actor = system.actorOf(Props(new SubscribersKeeperActor(store)))
-    Main.conf.httpEventEndpoints.get foreach { urls =>
+    conf.httpEventEndpoints.get foreach { urls =>
       log.info(s"http_endpoints($urls) are specified at startup. Those will be added to subscribers list.")
       urls foreach { url =>
         val f = (actor ? Subscribe(local_ip, url)).mapTo[MarathonSubscriptionEvent]
